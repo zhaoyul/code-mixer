@@ -232,9 +232,8 @@ public class Obfuscator
         var compilation = await project.GetCompilationAsync();
         if (compilation == null) return solution;
 
-        // Collect all symbols to rename with their original names and metadata
-        var symbolsToRename = new List<(ISymbol symbol, string originalName, string key)>();
-        var processedKeys = new HashSet<string>();
+        // Collect all symbols to rename
+        var symbolsToRename = new List<ISymbol>();
 
         foreach (var syntaxTree in compilation.SyntaxTrees)
         {
@@ -253,12 +252,7 @@ public class Obfuscator
                 var symbol = semanticModel.GetDeclaredSymbol(typeDecl);
                 if (symbol != null && ShouldRenameSymbol(symbol))
                 {
-                    var key = GetSymbolKey(symbol);
-                    if (!processedKeys.Contains(key))
-                    {
-                        symbolsToRename.Add((symbol, symbol.Name, key));
-                        processedKeys.Add(key);
-                    }
+                    symbolsToRename.Add(symbol);
                 }
             }
 
@@ -269,12 +263,7 @@ public class Obfuscator
                 var symbol = semanticModel.GetDeclaredSymbol(methodDecl);
                 if (symbol != null && ShouldRenameSymbol(symbol))
                 {
-                    var key = GetSymbolKey(symbol);
-                    if (!processedKeys.Contains(key))
-                    {
-                        symbolsToRename.Add((symbol, symbol.Name, key));
-                        processedKeys.Add(key);
-                    }
+                    symbolsToRename.Add(symbol);
                 }
             }
 
@@ -285,12 +274,7 @@ public class Obfuscator
                 var symbol = semanticModel.GetDeclaredSymbol(propDecl);
                 if (symbol != null && ShouldRenameSymbol(symbol))
                 {
-                    var key = GetSymbolKey(symbol);
-                    if (!processedKeys.Contains(key))
-                    {
-                        symbolsToRename.Add((symbol, symbol.Name, key));
-                        processedKeys.Add(key);
-                    }
+                    symbolsToRename.Add(symbol);
                 }
             }
 
@@ -303,70 +287,43 @@ public class Obfuscator
                     var symbol = semanticModel.GetDeclaredSymbol(variable);
                     if (symbol != null && ShouldRenameSymbol(symbol))
                     {
-                        var key = GetSymbolKey(symbol);
-                        if (!processedKeys.Contains(key))
-                        {
-                            symbolsToRename.Add((symbol, symbol.Name, key));
-                            processedKeys.Add(key);
-                        }
+                        symbolsToRename.Add(symbol);
                     }
+                }
+            }
+
+            // Find all parameter declarations
+            var parameterDeclarations = root.DescendantNodes().OfType<ParameterSyntax>();
+            foreach (var paramDecl in parameterDeclarations)
+            {
+                var symbol = semanticModel.GetDeclaredSymbol(paramDecl);
+                if (symbol != null && ShouldRenameSymbol(symbol))
+                {
+                    symbolsToRename.Add(symbol);
                 }
             }
         }
 
-        // Now rename all symbols one by one
-        foreach (var (symbol, originalName, key) in symbolsToRename)
+        // Rename symbols
+        foreach (var symbol in symbolsToRename)
         {
+            var originalName = symbol.Name;
             var newName = GenerateNewName(symbol);
 
             if (!string.IsNullOrEmpty(newName) && originalName != newName)
             {
                 Console.WriteLine($"  Renaming {symbol.Kind}: {originalName} -> {newName}");
-                _symbolMap[key] = newName;
+                _symbolMap[GetSymbolKey(symbol)] = newName;
 
-                try
-                {
-                    var currentSymbol = await FindSymbolInSolutionAsync(solution, symbol);
-                    if (currentSymbol != null)
-                    {
-                        solution = await Renamer.RenameSymbolAsync(
-                            solution,
-                            currentSymbol,
-                            default(SymbolRenameOptions),
-                            newName);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"    Warning: Failed to rename {originalName}: {ex.Message}");
-                }
+                solution = await Renamer.RenameSymbolAsync(
+                    solution,
+                    symbol,
+                    default(SymbolRenameOptions),
+                    newName);
             }
         }
 
         return solution;
-    }
-
-    // Helper method to find the current symbol in the updated solution
-    private async Task<ISymbol?> FindSymbolInSolutionAsync(Solution solution, ISymbol originalSymbol)
-    {
-        var location = originalSymbol.Locations.FirstOrDefault();
-        if (location == null || location.SourceTree == null)
-            return null;
-
-        var document = solution.GetDocument(location.SourceTree);
-        if (document == null)
-            return null;
-
-        var semanticModel = await document.GetSemanticModelAsync();
-        if (semanticModel == null)
-            return null;
-
-        var root = await document.GetSyntaxRootAsync();
-        if (root == null)
-            return null;
-
-        var node = root.FindNode(location.SourceSpan);
-        return semanticModel.GetDeclaredSymbol(node);
     }
 
     private async Task<Solution> RestoreProjectAsync(Solution solution, ProjectId projectId, Dictionary<string, string> reverseMap)
@@ -499,15 +456,8 @@ public class Obfuscator
 
     private string GetSymbolKey(ISymbol symbol)
     {
-        // Create a unique key for the symbol using its full qualified name and location
-        // We use GetDocumentFilePath and location to uniquely identify symbols since names can change
-        var location = symbol.Locations.FirstOrDefault();
-        var filePath = location?.SourceTree?.FilePath ?? "unknown";
-        var lineNumber = location?.GetLineSpan().StartLinePosition.Line ?? -1;
-        
-        // Use containing type's original metadata name + symbol name + kind + location
-        var containingType = symbol.ContainingType?.MetadataName ?? symbol.ContainingNamespace?.ToDisplayString() ?? "";
-        return $"{containingType}::{symbol.MetadataName}:{symbol.Kind}:{filePath}:{lineNumber}";
+        // Create a unique key for the symbol
+        return $"{symbol.ContainingType?.ToDisplayString() ?? ""}.{symbol.Name}:{symbol.Kind}";
     }
 
     private async Task SaveMappingAsync(string path)
