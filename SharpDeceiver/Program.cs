@@ -13,7 +13,7 @@ class Program
         string? path = null;
         string? exclude = null;
         string map = "./deceiver_map.json";
-        string? dictionary = null;
+        string? dictionary = null; // Reserved for future use: custom dictionary file
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -39,6 +39,7 @@ class Program
             }
             else if (args[i] == "--dictionary" || args[i] == "-d")
             {
+                // Reserved for future use: allow users to provide custom word dictionaries
                 if (i + 1 < args.Length)
                     dictionary = args[++i];
             }
