@@ -9,16 +9,16 @@ SharpDeceiver 是一个专门为 C# 设计的源代码级混淆工具. 与传统
 
 * 核心特性
 
-* **语义伪装 (Semantic Camouflage)**: 弃用 =a1_b2= 这种明显的随机字符, 转而使用诸如 =BaseMonitor=, =StreamHelper=, =ContextProcessor= 等看起来极其正规但与原意无关的词汇.
-* **原地替换 (In-place Transformation)**: 直接修改指定路径下的源文件, 无需维护镜像目录.
-* **可逆操作 (Reversible)**: 通过本地生成的 =deceiver_map.json= 记录映射关系, 随时一键还原回原始代码.
-* **项目过滤**: 可在处理过程中排除指定的工程(Project), 避免对公共库或测试代码进行干扰.
-* **命令行驱动**: 适合集成到构建脚本中.
+* *语义伪装 (Semantic Camouflage)*: 弃用 =a1_b2= 这种明显的随机字符, 转而使用诸如 =BaseMonitor=, =StreamHelper=, =ContextProcessor= 等看起来极其正规但与原意无关的词汇.
+* *原地替换 (In-place Transformation)*: 直接修改指定路径下的源文件, 无需维护镜像目录.
+* *可逆操作 (Reversible)*: 通过本地生成的 =deceiver_map.json= 记录映射关系, 随时一键还原回原始代码.
+* *项目过滤*: 可在处理过程中排除指定的工程(Project), 避免对公共库或测试代码进行干扰.
+* *命令行驱动*: 适合集成到构建脚本中.
 
 * 使用方法
 本工具编译后生成 =SharpDeceiver.exe=.
 
-**注意: 在进行混淆前, 强烈建议先提交 Git 仓库或备份代码. **
+*注意: 在进行混淆前, 强烈建议先提交 Git 仓库或备份代码.*
 
 ** 1. 混淆代码 (Obfuscate)
 对指定路径下的代码进行原地重命名.
@@ -46,28 +46,28 @@ SharpDeceiver 是一个专门为 C# 设计的源代码级混淆工具. 与传统
 * 混淆示例
 ** 原始代码 (Original)
 #+BEGIN_SRC csharp
-public class UserAuthService {
-public bool Login(string password) {
-return password == "123456";
-}
-}
+  public class UserAuthService {
+      public bool Login(string password) {
+          return password == "123456";
+      }
+  }
 #+END_SRC
 
 ** 混淆后代码 (Deceived)
 #+BEGIN_SRC csharp
-// 代码语义看起来像是数据缓存处理, 实际是登录逻辑
-public class CacheBufferProvider {
-public bool sync_metadata(string input_buffer) {
-return input_buffer == "123456";
-}
-}
+  // 代码语义看起来像是数据缓存处理, 实际是登录逻辑
+  public class CacheBufferProvider {
+      public bool sync_metadata(string input_buffer) {
+          return input_buffer == "123456";
+      }
+  }
 #+END_SRC
 
 * 技术架构
 
-1. **基于 Roslyn 分析**: 使用 =Microsoft.CodeAnalysis= 深度解析 C# 语法树 (AST) 和符号信息.
-2. **误导性词库**: 预置了约 1000 个常见的软件工程词汇, 混淆时会从词库中随机抽取并组合, 确保混淆后的标识符" 看起来很像真的" .
-3. **符号重命名**: 使用 =Renamer.RenameSymbolAsync= 确保所有引用(调用处, 定义处)同步修改, 不破坏代码的编译正确性.
+1. *基于 Roslyn 分析*: 使用 =Microsoft.CodeAnalysis= 深度解析 C# 语法树 (AST) 和符号信息.
+2. *误导性词库*: 预置了约 1000 个常见的软件工程词汇, 混淆时会从词库中随机抽取并组合, 确保混淆后的标识符" 看起来很像真的" .
+3. *符号重命名*: 使用 =Renamer.RenameSymbolAsync= 确保所有引用(调用处, 定义处)同步修改, 不破坏代码的编译正确性.
 
 * 许可证
 MIT Licensex
