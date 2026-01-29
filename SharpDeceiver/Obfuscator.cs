@@ -18,9 +18,12 @@ namespace SharpDeceiver;
 /// </summary>
 public class Obfuscator
 {
-    private readonly Dictionary<string, string> _symbolMap = new();
+    private readonly List<SymbolMapping> _symbolMappings = new();
     private readonly HashSet<string> _excludedProjects = new();
     private MSBuildWorkspace? _workspace;
+    private Dictionary<string, string>? _legacyObfuscatedToOriginalName;
+
+    private sealed record SymbolMapping(string OriginalName, string OriginalKey, string ObfuscatedKey);
 
     public Obfuscator(IEnumerable<string>? excludedProjects = null)
     {
@@ -87,11 +90,19 @@ public class Obfuscator
             Console.WriteLine($"Loaded solution with {solution.Projects.Count()} projects");
 
             // Reset the dictionary to start fresh
-            DeceiverDictionary.Reset();
+            ScannerGroup.Reset();
 
-            // Process each project
-            foreach (var project in solution.Projects)
+            // Process each project in dependency order
+            var projectOrder = solution.GetProjectDependencyGraph()
+                .GetTopologicallySortedProjects()
+                .ToList();
+
+            foreach (var projectId in projectOrder)
             {
+                var project = solution.GetProject(projectId);
+                if (project == null)
+                    continue;
+
                 if (_excludedProjects.Contains(project.Name))
                 {
                     Console.WriteLine($"Skipping excluded project: {project.Name}");
@@ -113,7 +124,7 @@ public class Obfuscator
             Console.WriteLine($"Saving mapping to: {mapOutputPath}");
             await SaveMappingAsync(mapOutputPath);
 
-            Console.WriteLine($"Obfuscation complete! Renamed {_symbolMap.Count} symbols.");
+            Console.WriteLine($"Obfuscation complete! Renamed {_symbolMappings.Count} symbols.");
             return true;
         }
         catch (Exception ex)
@@ -145,7 +156,7 @@ public class Obfuscator
                 return false;
             }
 
-            Console.WriteLine($"Loaded {_symbolMap.Count} symbol mappings");
+            Console.WriteLine($"Loaded {_symbolMappings.Count} symbol mappings");
 
             // Initialize MSBuild
             if (!MSBuildLocator.IsRegistered)
@@ -186,12 +197,33 @@ public class Obfuscator
                 return false;
             }
 
-            // Create reverse mapping (obfuscated -> original)
-            var reverseMap = _symbolMap.ToDictionary(kvp => kvp.Value, kvp => kvp.Key);
-
-            // Process each project
-            foreach (var project in solution.Projects)
+            // Create reverse mapping (obfuscated -> original) using symbol keys
+            Dictionary<string, string>? obfuscatedKeyToOriginalName = null;
+            if (_symbolMappings.Count > 0)
             {
+                obfuscatedKeyToOriginalName = new Dictionary<string, string>();
+                foreach (var mapping in _symbolMappings)
+                {
+                    if (string.IsNullOrWhiteSpace(mapping.ObfuscatedKey))
+                        continue;
+                    if (!obfuscatedKeyToOriginalName.ContainsKey(mapping.ObfuscatedKey))
+                    {
+                        obfuscatedKeyToOriginalName[mapping.ObfuscatedKey] = mapping.OriginalName;
+                    }
+                }
+            }
+
+            // Process each project in dependency order
+            var projectOrder = solution.GetProjectDependencyGraph()
+                .GetTopologicallySortedProjects()
+                .ToList();
+
+            foreach (var projectId in projectOrder)
+            {
+                var project = solution.GetProject(projectId);
+                if (project == null)
+                    continue;
+
                 if (_excludedProjects.Contains(project.Name))
                 {
                     Console.WriteLine($"Skipping excluded project: {project.Name}");
@@ -199,7 +231,18 @@ public class Obfuscator
                 }
 
                 Console.WriteLine($"Restoring project: {project.Name}");
-                solution = await RestoreProjectAsync(solution, project.Id, reverseMap);
+                if (obfuscatedKeyToOriginalName != null && obfuscatedKeyToOriginalName.Count > 0)
+                {
+                    solution = await RestoreProjectAsync(solution, project.Id, obfuscatedKeyToOriginalName);
+                }
+                else if (_legacyObfuscatedToOriginalName != null && _legacyObfuscatedToOriginalName.Count > 0)
+                {
+                    solution = await RestoreProjectLegacyAsync(solution, project.Id, _legacyObfuscatedToOriginalName);
+                }
+                else
+                {
+                    Console.WriteLine("No valid mappings found; skipping restoration.");
+                }
             }
 
             // Apply all changes
@@ -317,12 +360,11 @@ public class Obfuscator
         // Now rename all symbols one by one
         foreach (var (symbol, originalName, key) in symbolsToRename)
         {
-            var newName = GenerateNewName(symbol);
+            var newName = GenerateUniqueName(symbol);
 
             if (!string.IsNullOrEmpty(newName) && originalName != newName)
             {
                 Console.WriteLine($"  Renaming {symbol.Kind}: {originalName} -> {newName}");
-                _symbolMap[key] = newName;
 
                 try
                 {
@@ -334,6 +376,13 @@ public class Obfuscator
                             currentSymbol,
                             default(SymbolRenameOptions),
                             newName);
+
+                        var updatedSymbol = await FindRenamedSymbolAsync(solution, symbol, newName);
+                        if (updatedSymbol != null)
+                        {
+                            var obfuscatedKey = GetSymbolKey(updatedSymbol);
+                            _symbolMappings.Add(new SymbolMapping(originalName, key, obfuscatedKey));
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -369,7 +418,68 @@ public class Obfuscator
         return semanticModel.GetDeclaredSymbol(node);
     }
 
-    private async Task<Solution> RestoreProjectAsync(Solution solution, ProjectId projectId, Dictionary<string, string> reverseMap)
+    private async Task<ISymbol?> FindRenamedSymbolAsync(Solution solution, ISymbol originalSymbol, string newName)
+    {
+        var location = originalSymbol.Locations.FirstOrDefault();
+        var filePath = location?.SourceTree?.FilePath;
+        if (string.IsNullOrWhiteSpace(filePath))
+            return null;
+
+        var lineNumber = location?.GetLineSpan().StartLinePosition.Line ?? -1;
+        var document = solution.Projects
+            .SelectMany(p => p.Documents)
+            .FirstOrDefault(d => string.Equals(d.FilePath, filePath, StringComparison.OrdinalIgnoreCase));
+        if (document == null)
+            return null;
+
+        var semanticModel = await document.GetSemanticModelAsync();
+        var root = await document.GetSyntaxRootAsync();
+        if (semanticModel == null || root == null)
+            return null;
+
+        IEnumerable<SyntaxNode> candidates = originalSymbol.Kind switch
+        {
+            SymbolKind.NamedType => root.DescendantNodes()
+                .Where(node => node is ClassDeclarationSyntax ||
+                               node is InterfaceDeclarationSyntax ||
+                               node is StructDeclarationSyntax ||
+                               node is EnumDeclarationSyntax),
+            SymbolKind.Method => root.DescendantNodes().OfType<MethodDeclarationSyntax>(),
+            SymbolKind.Property => root.DescendantNodes().OfType<PropertyDeclarationSyntax>(),
+            SymbolKind.Field => root.DescendantNodes().OfType<VariableDeclaratorSyntax>(),
+            _ => Enumerable.Empty<SyntaxNode>()
+        };
+
+        var namedCandidates = candidates
+            .Where(node => GetNodeIdentifier(node) == newName)
+            .ToList();
+
+        if (namedCandidates.Count == 0)
+            return null;
+
+        var lineMatched = namedCandidates
+            .FirstOrDefault(node => node.GetLocation().GetLineSpan().StartLinePosition.Line == lineNumber);
+
+        var targetNode = lineMatched ?? namedCandidates[0];
+        return semanticModel.GetDeclaredSymbol(targetNode);
+    }
+
+    private static string? GetNodeIdentifier(SyntaxNode node)
+    {
+        return node switch
+        {
+            ClassDeclarationSyntax cds => cds.Identifier.Text,
+            InterfaceDeclarationSyntax ids => ids.Identifier.Text,
+            StructDeclarationSyntax sds => sds.Identifier.Text,
+            EnumDeclarationSyntax eds => eds.Identifier.Text,
+            MethodDeclarationSyntax mds => mds.Identifier.Text,
+            PropertyDeclarationSyntax pds => pds.Identifier.Text,
+            VariableDeclaratorSyntax vds => vds.Identifier.Text,
+            _ => null
+        };
+    }
+
+    private async Task<Solution> RestoreProjectAsync(Solution solution, ProjectId projectId, Dictionary<string, string> obfuscatedKeyToOriginalName)
     {
         var project = solution.GetProject(projectId);
         if (project == null) return solution;
@@ -385,40 +495,71 @@ public class Obfuscator
             var semanticModel = compilation.GetSemanticModel(syntaxTree);
             var root = await syntaxTree.GetRootAsync();
 
-            // Find all declarations
-            var declarations = root.DescendantNodes()
-                .Where(node => node is BaseTypeDeclarationSyntax || 
-                               node is MethodDeclarationSyntax ||
-                               node is PropertyDeclarationSyntax ||
-                               node is FieldDeclarationSyntax ||
-                               node is ParameterSyntax);
+            // Find all named type declarations (classes, interfaces, structs, enums)
+            var typeDeclarations = root.DescendantNodes()
+                .Where(node => node is ClassDeclarationSyntax ||
+                               node is InterfaceDeclarationSyntax ||
+                               node is StructDeclarationSyntax ||
+                               node is EnumDeclarationSyntax);
 
-            foreach (var decl in declarations)
+            foreach (var typeDecl in typeDeclarations)
             {
-                ISymbol? symbol = null;
-                
-                if (decl is FieldDeclarationSyntax fieldDecl)
+                var symbol = semanticModel.GetDeclaredSymbol(typeDecl);
+                if (symbol != null)
                 {
-                    foreach (var variable in fieldDecl.Declaration.Variables)
+                    // Check if this symbol's current (obfuscated) name is in our reverse map
+                    var obfuscatedKey = GetSymbolKey(symbol);
+                    if (obfuscatedKeyToOriginalName.TryGetValue(obfuscatedKey, out var originalName))
                     {
-                        symbol = semanticModel.GetDeclaredSymbol(variable);
-                        if (symbol != null)
-                        {
-                            var key = GetSymbolKey(symbol);
-                            if (reverseMap.TryGetValue(key, out var originalName))
-                            {
-                                symbolsToRestore.Add((symbol, originalName));
-                            }
-                        }
+                        symbolsToRestore.Add((symbol, originalName));
                     }
                 }
-                else
+            }
+
+            // Find all method declarations
+            var methodDeclarations = root.DescendantNodes().OfType<MethodDeclarationSyntax>();
+            foreach (var methodDecl in methodDeclarations)
+            {
+                var symbol = semanticModel.GetDeclaredSymbol(methodDecl);
+                if (symbol != null)
                 {
-                    symbol = semanticModel.GetDeclaredSymbol(decl);
+                    // Check if this symbol's current (obfuscated) name is in our reverse map
+                    var obfuscatedKey = GetSymbolKey(symbol);
+                    if (obfuscatedKeyToOriginalName.TryGetValue(obfuscatedKey, out var originalName))
+                    {
+                        symbolsToRestore.Add((symbol, originalName));
+                    }
+                }
+            }
+
+            // Find all property declarations
+            var propertyDeclarations = root.DescendantNodes().OfType<PropertyDeclarationSyntax>();
+            foreach (var propDecl in propertyDeclarations)
+            {
+                var symbol = semanticModel.GetDeclaredSymbol(propDecl);
+                if (symbol != null)
+                {
+                    // Check if this symbol's current (obfuscated) name is in our reverse map
+                    var obfuscatedKey = GetSymbolKey(symbol);
+                    if (obfuscatedKeyToOriginalName.TryGetValue(obfuscatedKey, out var originalName))
+                    {
+                        symbolsToRestore.Add((symbol, originalName));
+                    }
+                }
+            }
+
+            // Find all field declarations
+            var fieldDeclarations = root.DescendantNodes().OfType<FieldDeclarationSyntax>();
+            foreach (var fieldDecl in fieldDeclarations)
+            {
+                foreach (var variable in fieldDecl.Declaration.Variables)
+                {
+                    var symbol = semanticModel.GetDeclaredSymbol(variable);
                     if (symbol != null)
                     {
-                        var key = GetSymbolKey(symbol);
-                        if (reverseMap.TryGetValue(key, out var originalName))
+                        // Check if this symbol's current (obfuscated) name is in our reverse map
+                        var obfuscatedKey = GetSymbolKey(symbol);
+                        if (obfuscatedKeyToOriginalName.TryGetValue(obfuscatedKey, out var originalName))
                         {
                             symbolsToRestore.Add((symbol, originalName));
                         }
@@ -432,14 +573,122 @@ public class Obfuscator
         {
             Console.WriteLine($"  Restoring {symbol.Kind}: {symbol.Name} -> {originalName}");
 
+            var currentSymbol = await FindSymbolInSolutionAsync(solution, symbol);
+            if (currentSymbol == null)
+                continue;
+
             solution = await Renamer.RenameSymbolAsync(
                 solution,
-                symbol,
+                currentSymbol,
                 default(SymbolRenameOptions),
                 originalName);
         }
 
         return solution;
+    }
+
+    private async Task<Solution> RestoreProjectLegacyAsync(Solution solution, ProjectId projectId, Dictionary<string, string> obfuscatedNameToOriginalName)
+    {
+        var project = solution.GetProject(projectId);
+        if (project == null) return solution;
+
+        var compilation = await project.GetCompilationAsync();
+        if (compilation == null) return solution;
+
+        var symbolsToRestore = new List<(ISymbol symbol, string originalName)>();
+
+        foreach (var syntaxTree in compilation.SyntaxTrees)
+        {
+            var semanticModel = compilation.GetSemanticModel(syntaxTree);
+            var root = await syntaxTree.GetRootAsync();
+
+            var typeDeclarations = root.DescendantNodes()
+                .Where(node => node is ClassDeclarationSyntax ||
+                               node is InterfaceDeclarationSyntax ||
+                               node is StructDeclarationSyntax ||
+                               node is EnumDeclarationSyntax);
+
+            foreach (var typeDecl in typeDeclarations)
+            {
+                var symbol = semanticModel.GetDeclaredSymbol(typeDecl);
+                if (symbol != null && obfuscatedNameToOriginalName.TryGetValue(symbol.Name, out var originalName))
+                {
+                    symbolsToRestore.Add((symbol, originalName));
+                }
+            }
+
+            var methodDeclarations = root.DescendantNodes().OfType<MethodDeclarationSyntax>();
+            foreach (var methodDecl in methodDeclarations)
+            {
+                var symbol = semanticModel.GetDeclaredSymbol(methodDecl);
+                if (symbol != null && obfuscatedNameToOriginalName.TryGetValue(symbol.Name, out var originalName))
+                {
+                    symbolsToRestore.Add((symbol, originalName));
+                }
+            }
+
+            var propertyDeclarations = root.DescendantNodes().OfType<PropertyDeclarationSyntax>();
+            foreach (var propDecl in propertyDeclarations)
+            {
+                var symbol = semanticModel.GetDeclaredSymbol(propDecl);
+                if (symbol != null && obfuscatedNameToOriginalName.TryGetValue(symbol.Name, out var originalName))
+                {
+                    symbolsToRestore.Add((symbol, originalName));
+                }
+            }
+
+            var fieldDeclarations = root.DescendantNodes().OfType<FieldDeclarationSyntax>();
+            foreach (var fieldDecl in fieldDeclarations)
+            {
+                foreach (var variable in fieldDecl.Declaration.Variables)
+                {
+                    var symbol = semanticModel.GetDeclaredSymbol(variable);
+                    if (symbol != null && obfuscatedNameToOriginalName.TryGetValue(symbol.Name, out var originalName))
+                    {
+                        symbolsToRestore.Add((symbol, originalName));
+                    }
+                }
+            }
+        }
+
+        foreach (var (symbol, originalName) in symbolsToRestore)
+        {
+            Console.WriteLine($"  Restoring {symbol.Kind}: {symbol.Name} -> {originalName}");
+
+            var currentSymbol = await FindSymbolInSolutionAsync(solution, symbol);
+            if (currentSymbol == null)
+                continue;
+
+            solution = await Renamer.RenameSymbolAsync(
+                solution,
+                currentSymbol,
+                default(SymbolRenameOptions),
+                originalName);
+        }
+
+        return solution;
+    }
+
+    // Helper method to extract the original name from the symbol key
+    private string ExtractOriginalName(string key)
+    {
+        // Key format: [containingType]::[symbolName]:[Kind]:[filePath]:[lineNumber]
+        // Example: <global namespace>::Program:NamedType:/path/to/Program.cs:6
+        // We need to split on "::" first, then the rest
+        var doubleColonIndex = key.IndexOf("::");
+        if (doubleColonIndex != -1)
+        {
+            var afterDoubleColon = key.Substring(doubleColonIndex + 2);
+            var colonIndex = afterDoubleColon.IndexOf(':');
+            if (colonIndex != -1)
+            {
+                return afterDoubleColon.Substring(0, colonIndex);
+            }
+            return afterDoubleColon; // if no colon after "::", return the rest
+        }
+
+        // If parse fails, return the whole key as fallback
+        return key;
     }
 
     private bool ShouldRenameSymbol(ISymbol symbol)
@@ -465,13 +714,16 @@ public class Obfuscator
         {
             if (method.ExplicitInterfaceImplementations.Any())
                 return false;
-            
-            // Check if overriding interface
+
             var interfaces = method.ContainingType.AllInterfaces;
             foreach (var iface in interfaces)
             {
-                if (iface.GetMembers().Any(m => m.Name == symbol.Name))
-                    return false;
+                foreach (var member in iface.GetMembers())
+                {
+                    var impl = method.ContainingType.FindImplementationForInterfaceMember(member);
+                    if (SymbolEqualityComparer.Default.Equals(impl, method))
+                        return false;
+                }
             }
         }
 
@@ -479,6 +731,17 @@ public class Obfuscator
         {
             if (property.ExplicitInterfaceImplementations.Any())
                 return false;
+
+            var interfaces = property.ContainingType.AllInterfaces;
+            foreach (var iface in interfaces)
+            {
+                foreach (var member in iface.GetMembers())
+                {
+                    var impl = property.ContainingType.FindImplementationForInterfaceMember(member);
+                    if (SymbolEqualityComparer.Default.Equals(impl, property))
+                        return false;
+                }
+            }
         }
 
         return true;
@@ -488,33 +751,108 @@ public class Obfuscator
     {
         return symbol.Kind switch
         {
-            SymbolKind.NamedType => DeceiverDictionary.GenerateClassName(),
-            SymbolKind.Method => DeceiverDictionary.GenerateMethodName(),
-            SymbolKind.Property => DeceiverDictionary.GeneratePropertyName(),
-            SymbolKind.Field => DeceiverDictionary.GenerateVariableName(),
-            SymbolKind.Parameter => DeceiverDictionary.GenerateVariableName(),
-            _ => DeceiverDictionary.GenerateVariableName()
+            SymbolKind.NamedType => ScannerGroup.GenerateClassName(),
+            SymbolKind.Method => ScannerGroup.GenerateMethodName(),
+            SymbolKind.Property => ScannerGroup.GeneratePropertyName(),
+            SymbolKind.Field => ScannerGroup.GenerateVariableName(),
+            SymbolKind.Parameter => ScannerGroup.GenerateVariableName(),
+            _ => ScannerGroup.GenerateVariableName()
         };
+    }
+
+    private string GenerateUniqueName(ISymbol symbol)
+    {
+        const int maxAttempts = 200;
+        for (var i = 0; i < maxAttempts; i++)
+        {
+            var candidate = GenerateNewName(symbol);
+            if (string.IsNullOrWhiteSpace(candidate))
+                continue;
+            if (!SyntaxFacts.IsValidIdentifier(candidate))
+                continue;
+            if (!HasNameConflict(symbol, candidate))
+                return candidate;
+        }
+
+        return GenerateNewName(symbol);
+    }
+
+    private static bool HasNameConflict(ISymbol symbol, string candidate)
+    {
+        if (symbol is INamedTypeSymbol)
+        {
+            if (symbol.ContainingType != null)
+            {
+                return symbol.ContainingType.GetMembers(candidate)
+                    .Any(m => !SymbolEqualityComparer.Default.Equals(m, symbol));
+            }
+
+            return symbol.ContainingNamespace.GetMembers(candidate)
+                .Any(m => !SymbolEqualityComparer.Default.Equals(m, symbol));
+        }
+
+        var containingType = symbol.ContainingType;
+        if (containingType == null)
+            return false;
+
+        if (symbol is IMethodSymbol method)
+        {
+            foreach (var member in containingType.GetMembers(candidate))
+            {
+                if (member is IMethodSymbol other)
+                {
+                    if (SymbolEqualityComparer.Default.Equals(other, method))
+                        continue;
+                    if (MethodSignaturesMatch(method, other))
+                        return true;
+                }
+                else
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        return containingType.GetMembers(candidate)
+            .Any(m => !SymbolEqualityComparer.Default.Equals(m, symbol));
+    }
+
+    private static bool MethodSignaturesMatch(IMethodSymbol a, IMethodSymbol b)
+    {
+        if (a.Parameters.Length != b.Parameters.Length)
+            return false;
+        if (a.TypeParameters.Length != b.TypeParameters.Length)
+            return false;
+
+        for (var i = 0; i < a.Parameters.Length; i++)
+        {
+            if (!SymbolEqualityComparer.Default.Equals(a.Parameters[i].Type, b.Parameters[i].Type))
+                return false;
+        }
+
+        return true;
     }
 
     private string GetSymbolKey(ISymbol symbol)
     {
-        // Create a unique key for the symbol using its full qualified name and location
-        // We use GetDocumentFilePath and location to uniquely identify symbols since names can change
-        var location = symbol.Locations.FirstOrDefault();
-        var filePath = location?.SourceTree?.FilePath ?? "unknown";
-        var lineNumber = location?.GetLineSpan().StartLinePosition.Line ?? -1;
-        
-        // Use containing type's original metadata name + symbol name + kind + location
-        var containingType = symbol.ContainingType?.MetadataName ?? symbol.ContainingNamespace?.ToDisplayString() ?? "";
-        return $"{containingType}::{symbol.MetadataName}:{symbol.Kind}:{filePath}:{lineNumber}";
+        var docId = symbol.GetDocumentationCommentId();
+        if (!string.IsNullOrWhiteSpace(docId))
+        {
+            return docId;
+        }
+
+        var container = symbol.ContainingType?.ToDisplayString() ??
+                       symbol.ContainingNamespace?.ToDisplayString() ?? "";
+        return $"{container}::{symbol.MetadataName}:{symbol.Kind}";
     }
 
     private async Task SaveMappingAsync(string path)
     {
-        var json = JsonSerializer.Serialize(_symbolMap, new JsonSerializerOptions 
-        { 
-            WriteIndented = true 
+        var json = JsonSerializer.Serialize(_symbolMappings, new JsonSerializerOptions
+        {
+            WriteIndented = true
         });
         await File.WriteAllTextAsync(path, json);
     }
@@ -527,14 +865,24 @@ public class Obfuscator
                 return false;
 
             var json = await File.ReadAllTextAsync(path);
-            var map = JsonSerializer.Deserialize<Dictionary<string, string>>(json);
-            
-            if (map != null)
+            var mappings = JsonSerializer.Deserialize<List<SymbolMapping>>(json);
+            if (mappings != null && mappings.Count > 0)
             {
-                _symbolMap.Clear();
-                foreach (var kvp in map)
+                _symbolMappings.Clear();
+                _symbolMappings.AddRange(mappings);
+                _legacyObfuscatedToOriginalName = null;
+                return true;
+            }
+
+            var legacyMap = JsonSerializer.Deserialize<Dictionary<string, string>>(json);
+            if (legacyMap != null && legacyMap.Count > 0)
+            {
+                // Legacy format: originalKey -> obfuscatedName
+                _legacyObfuscatedToOriginalName = new Dictionary<string, string>();
+                foreach (var kvp in legacyMap)
                 {
-                    _symbolMap[kvp.Key] = kvp.Value;
+                    var originalName = ExtractOriginalName(kvp.Key);
+                    _legacyObfuscatedToOriginalName[kvp.Value] = originalName;
                 }
                 return true;
             }

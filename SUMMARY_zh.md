@@ -31,6 +31,7 @@ SharpDeceiver 是一个专门为 C# 设计的源代码级混淆工具。与传�
    - 支持 `--path` (解决方案或项目路径)
    - 支持 `--exclude` (排除指定项目)
    - 支持 `--map` (自定义映射文件路径)
+   - 支持 `--dictionary` (自定义词库) 与 `--seed` (固定随机种子)
    - 提供 `--help` 帮助信息
 
 6. **项目过滤**
@@ -139,7 +140,7 @@ dotnet run --project SharpDeceiver/SharpDeceiver.csproj -- \
 ## 构建说明
 
 ### 前置要求
-- .NET SDK 8.0 或更高版本
+- .NET SDK 8.0 或更高版本（已在 8.0 版本测试）
 - MSBuild（包含在 .NET SDK 中）
 
 ### 构建步骤

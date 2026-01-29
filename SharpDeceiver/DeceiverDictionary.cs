@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text.Json;
 
 namespace SharpDeceiver;
 
@@ -8,12 +10,13 @@ namespace SharpDeceiver;
 /// Provides a dictionary of deceptive but realistic-looking software engineering terms
 /// for semantic camouflage obfuscation.
 /// </summary>
-public static class DeceiverDictionary
+public static class ScannerGroup
 {
-    private static readonly Random _random = new Random();
+    private static Random _random = new Random();
+    private static int? _seed;
     
     // Prefixes for class/method names
-    private static readonly string[] _prefixes = new[]
+    private static string[] _prefixes = new[]
     {
         "Base", "Abstract", "Generic", "Default", "Common", "Core", "Main",
         "System", "Application", "Service", "Business", "Data", "Entity",
@@ -29,7 +32,7 @@ public static class DeceiverDictionary
     };
 
     // Core nouns for class/method names
-    private static readonly string[] _nouns = new[]
+    private static string[] _nouns = new[]
     {
         "Monitor", "Observer", "Watcher", "Tracker", "Logger", "Recorder",
         "Reader", "Writer", "Scanner", "Generator", "Creator", "Destroyer",
@@ -51,7 +54,7 @@ public static class DeceiverDictionary
     };
 
     // Suffixes for class/method names  
-    private static readonly string[] _suffixes = new[]
+    private static string[] _suffixes = new[]
     {
         "Engine", "Core", "System", "Framework", "Platform", "Infrastructure",
         "Service", "Manager", "Controller", "Handler", "Provider", "Factory",
@@ -60,7 +63,7 @@ public static class DeceiverDictionary
     };
 
     // Action verbs for method names
-    private static readonly string[] _verbs = new[]
+    private static string[] _verbs = new[]
     {
         "process", "handle", "manage", "execute", "perform", "run", "invoke",
         "call", "trigger", "fire", "dispatch", "route", "forward", "redirect",
@@ -84,7 +87,7 @@ public static class DeceiverDictionary
     };
 
     // Adjectives for variable/parameter names
-    private static readonly string[] _adjectives = new[]
+    private static string[] _adjectives = new[]
     {
         "current", "previous", "next", "first", "last", "initial", "final",
         "primary", "secondary", "temporary", "permanent", "local", "global",
@@ -97,7 +100,7 @@ public static class DeceiverDictionary
     };
 
     // Technical nouns for variable/parameter names
-    private static readonly string[] _technicalNouns = new[]
+    private static string[] _technicalNouns = new[]
     {
         "buffer", "cache", "pool", "queue", "stack", "heap", "list", "array",
         "vector", "matrix", "table", "map", "set", "tree", "graph", "node",
@@ -117,6 +120,16 @@ public static class DeceiverDictionary
     };
 
     private static readonly HashSet<string> _usedNames = new HashSet<string>();
+
+    private sealed class DictionaryConfig
+    {
+        public string[]? Prefixes { get; set; }
+        public string[]? Nouns { get; set; }
+        public string[]? Suffixes { get; set; }
+        public string[]? Verbs { get; set; }
+        public string[]? Adjectives { get; set; }
+        public string[]? TechnicalNouns { get; set; }
+    }
 
     /// <summary>
     /// Generates a deceptive class name that looks professional but is semantically misleading.
@@ -216,6 +229,72 @@ public static class DeceiverDictionary
     public static void Reset()
     {
         _usedNames.Clear();
+    }
+
+    public static void SetSeed(int seed)
+    {
+        _seed = seed;
+        _random = new Random(seed);
+    }
+
+    public static bool LoadCustomDictionary(string path)
+    {
+        if (!File.Exists(path))
+            return false;
+
+        var text = File.ReadAllText(path);
+
+        if (TryLoadJsonDictionary(text))
+            return true;
+
+        var words = ParseWordList(text);
+        if (words.Length == 0)
+            return false;
+
+        _nouns = words;
+        _technicalNouns = words;
+        return true;
+    }
+
+    private static bool TryLoadJsonDictionary(string text)
+    {
+        try
+        {
+            var config = JsonSerializer.Deserialize<DictionaryConfig>(
+                text,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+            if (config == null)
+                return false;
+
+            if (config.Prefixes != null && config.Prefixes.Length > 0)
+                _prefixes = config.Prefixes;
+            if (config.Nouns != null && config.Nouns.Length > 0)
+                _nouns = config.Nouns;
+            if (config.Suffixes != null && config.Suffixes.Length > 0)
+                _suffixes = config.Suffixes;
+            if (config.Verbs != null && config.Verbs.Length > 0)
+                _verbs = config.Verbs;
+            if (config.Adjectives != null && config.Adjectives.Length > 0)
+                _adjectives = config.Adjectives;
+            if (config.TechnicalNouns != null && config.TechnicalNouns.Length > 0)
+                _technicalNouns = config.TechnicalNouns;
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string[] ParseWordList(string text)
+    {
+        return text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(line => line.Trim())
+            .Where(line => line.Length > 0 && !line.StartsWith("#") && !line.StartsWith("//"))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     private static string GetRandom(string[] array)

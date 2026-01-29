@@ -13,7 +13,8 @@ class Program
         string? path = null;
         string? exclude = null;
         string map = "./deceiver_map.json";
-        string? dictionary = null; // Reserved for future use: custom dictionary file
+        string? dictionary = null; // Optional: custom dictionary file
+        int? seed = null;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -39,9 +40,22 @@ class Program
             }
             else if (args[i] == "--dictionary" || args[i] == "-d")
             {
-                // Reserved for future use: allow users to provide custom word dictionaries
+                // Optional: allow users to provide custom word dictionaries
                 if (i + 1 < args.Length)
                     dictionary = args[++i];
+            }
+            else if (args[i] == "--seed")
+            {
+                if (i + 1 < args.Length && int.TryParse(args[i + 1], out var parsedSeed))
+                {
+                    seed = parsedSeed;
+                    i++;
+                }
+                else
+                {
+                    Console.WriteLine("Error: --seed requires an integer value.");
+                    return 1;
+                }
             }
             else if (args[i] == "--help" || args[i] == "-h")
             {
@@ -73,6 +87,26 @@ class Program
             {
                 Console.WriteLine($"Error: File not found: {path}");
                 return 1;
+            }
+
+            if (!string.IsNullOrWhiteSpace(dictionary))
+            {
+                if (!File.Exists(dictionary))
+                {
+                    Console.WriteLine($"Error: Dictionary file not found: {dictionary}");
+                    return 1;
+                }
+
+                if (!ScannerGroup.LoadCustomDictionary(dictionary))
+                {
+                    Console.WriteLine($"Error: Failed to load dictionary file: {dictionary}");
+                    return 1;
+                }
+            }
+
+            if (seed.HasValue)
+            {
+                ScannerGroup.SetSeed(seed.Value);
             }
 
             // Parse excluded projects
@@ -147,6 +181,7 @@ class Program
         Console.WriteLine("  --exclude, -e <list>    Comma-separated list of project names to exclude");
         Console.WriteLine("  --map, -s <path>        Path to mapping file (default: ./deceiver_map.json)");
         Console.WriteLine("  --dictionary, -d <path> Path to custom dictionary file (optional)");
+        Console.WriteLine("  --seed <int>            Random seed for deterministic output (optional)");
         Console.WriteLine("  --help, -h              Show this help message");
         Console.WriteLine();
         Console.WriteLine("Examples:");

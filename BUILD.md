@@ -3,7 +3,7 @@
 ## Building the Tool
 
 ### Prerequisites
-- .NET SDK 8.0 or later (tested with .NET 10.0)
+- .NET SDK 8.0 or later (tested with .NET 8.0)
 - MSBuild (included with .NET SDK)
 
 ### Build Steps
@@ -22,7 +22,7 @@ dotnet build
 dotnet build -c Release
 ```
 
-The executable will be generated in `bin/Debug/net10.0/SharpDeceiver.dll` (or `bin/Release/net10.0/SharpDeceiver.dll` for Release builds).
+The executable will be generated in `bin/Debug/net8.0/SharpDeceiver.dll` (or `bin/Release/net8.0/SharpDeceiver.dll` for Release builds).
 
 ## Usage
 
@@ -38,14 +38,15 @@ dotnet SharpDeceiver/bin/Debug/net10.0/SharpDeceiver.dll [options]
 
 ### Command-Line Options
 
-| Option | Short | Required | Description |
-|--------|-------|----------|-------------|
-| `--mode` | `-m` | Yes | Operation mode: `obfuscate` or `restore` |
-| `--path` | `-p` | Yes | Path to C# solution (.sln) or project (.csproj) |
-| `--exclude` | `-e` | No | Comma-separated list of project names to exclude |
-| `--map` | `-s` | No | Path to mapping file (default: `./deceiver_map.json`) |
-| `--dictionary` | `-d` | No | Path to custom dictionary file (optional, not yet implemented) |
-| `--help` | `-h` | No | Show help message |
+| Option         | Short | Required | Description                                                    |
+|----------------|-------|----------|----------------------------------------------------------------|
+| `--mode`       | `-m`  | Yes      | Operation mode: `obfuscate` or `restore`                       |
+| `--path`       | `-p`  | Yes      | Path to C# solution (.sln) or project (.csproj)                |
+| `--exclude`    | `-e`  | No       | Comma-separated list of project names to exclude               |
+| `--map`        | `-s`  | No       | Path to mapping file (default: `./deceiver_map.json`)          |
+| `--dictionary` | `-d`  | No       | Path to custom dictionary file (optional) |
+| `--seed`       |       | No       | Random seed for deterministic output (optional) |
+| `--help`       | `-h`  | No       | Show help message                                              |
 
 ### Examples
 
@@ -152,6 +153,25 @@ public class NotifierStrategy
 4. The tool modifies source files **in-place**
 5. Restoration is experimental - use Git to revert if needed
 
+## Custom Dictionary Format
+
+Two formats are supported (JSON preferred):
+
+### JSON
+```json
+{
+  "prefixes": ["Core", "Main"],
+  "nouns": ["Engine", "Scheduler"],
+  "suffixes": ["Service", "Provider"],
+  "verbs": ["process", "build"],
+  "adjectives": ["current", "final"],
+  "technicalNouns": ["buffer", "queue"]
+}
+```
+
+### Plain text
+One word per line. Lines starting with `#` or `//` are ignored. Plain text overrides only `nouns` and `technicalNouns`.
+
 ## Troubleshooting
 
 ### Build Errors
@@ -181,16 +201,8 @@ If obfuscation fails partway through:
 
 ## Testing
 
-A test project is included in `TestProject/` to verify the tool works:
+No sample test project is included in this repository. To test the tool:
 
-```bash
-# Test obfuscation
-dotnet run --project SharpDeceiver/SharpDeceiver.csproj -- \
-  --mode obfuscate \
-  --path TestProject/TestApp.sln \
-  --map TestProject/test_map.json
-
-# Verify obfuscated code still works
-cd TestProject/TestApp
-dotnet run
-```
+1) Create a small C# solution (or use an internal test solution).
+2) Run obfuscation against the solution.
+3) Build and run the obfuscated solution to verify behavior.

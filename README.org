@@ -11,29 +11,55 @@ SharpDeceiver 是一个专门为 C# 设计的源代码级混淆工具. 与传统
 
 * *语义伪装 (Semantic Camouflage)*: 弃用 =a1_b2= 这种明显的随机字符, 转而使用诸如 =BaseMonitor=, =StreamHelper=, =ContextProcessor= 等看起来极其正规但与原意无关的词汇.
 * *原地替换 (In-place Transformation)*: 直接修改指定路径下的源文件, 无需维护镜像目录.
-* *可逆操作 (Reversible)*: 通过本地生成的 =deceiver_map.json= 记录映射关系, 随时一键还原回原始代码.
+* *可逆操作 (Reversible)*: 通过本地生成的 =deceiver_map.json= 记录映射关系, 支持还原(当前为实验性功能, 建议优先使用 Git 回滚).
 * *项目过滤*: 可在处理过程中排除指定的工程(Project), 避免对公共库或测试代码进行干扰.
 * *命令行驱动*: 适合集成到构建脚本中.
 
 * 使用方法
-本工具编译后生成 =SharpDeceiver.exe=.
+本工具编译后生成 =SharpDeceiver.exe= (也可直接使用 =dotnet run=).
 
 *注意: 在进行混淆前, 强烈建议先提交 Git 仓库或备份代码.*
+
+** 0. 快速检查
+- 建议先运行 =git status= 确认当前改动可回滚.
+- 确保解决方案能被 MSBuild 正常加载.
 
 ** 1. 混淆代码 (Obfuscate)
 对指定路径下的代码进行原地重命名.
 #+BEGIN_SRC bash
-./SharpDeceiver.exe --mode obfuscate --path "C:/MyProject/Solution.sln" --exclude "CommonLib,UnitTests"
+dotnet run --project SharpDeceiver/SharpDeceiver.csproj -- \
+  --mode obfuscate \
+  --path "/path/to/MySolution.sln" \
+  --exclude "CommonLib,UnitTests" \
+  --map "/path/to/deceiver_map.json" \
+  --seed 42 \
+  --dictionary "/path/to/dictionary.json"
 #+END_SRC
 
-* 此操作会修改所有相关 =.cs= 文件.
-* 同时在根目录生成 =deceiver_map.json=.
+- 此操作会修改所有相关 =.cs= 文件.
+- 会生成映射文件 =deceiver_map.json=.
+- 使用 =--seed= 可生成可重复的输出.
 
 ** 2. 还原代码 (Restore)
 利用映射文件将代码恢复到可读状态.
 #+BEGIN_SRC bash
-./SharpDeceiver.exe --mode restore --path "C:/MyProject/Solution.sln" --map "./deceiver_map.json"
+dotnet run --project SharpDeceiver/SharpDeceiver.csproj -- \
+  --mode restore \
+  --path "/path/to/MySolution.sln" \
+  --map "/path/to/deceiver_map.json"
 #+END_SRC
+
+** 3. 多项目 Solution 的处理顺序
+- 项目会按 *依赖拓扑顺序* 处理.
+- 依赖关系来自 =ProjectReference=.
+- 不依赖 NuGet 包顺序.
+
+** 4. MSBuild 加载失败时的处理建议
+当某些项目无法加载时, 日志会显示 "Workspace error". 该项目将被跳过.
+- 优先排除测试项目: =--exclude "xxx.Test,xxx.Tests"=
+- 临时抑制 TFM 警告: 在 .csproj 中添加:
+  =<SuppressTfmSupportBuildWarnings>true</SuppressTfmSupportBuildWarnings>=
+- 或升级目标框架到 =net8.0= 以避免兼容警告
 
 * 参数详解
 | 长参数       | 短参数 | 描述                                              |
@@ -42,7 +68,8 @@ SharpDeceiver 是一个专门为 C# 设计的源代码级混淆工具. 与传统
 | --path       | -p     | 目标 C# 解决方案 (.sln) 或项目目录路径            |
 | --exclude    | -e     | 排除的项目名称列表, 以逗号分隔                    |
 | --map        | -s     | 映射文件保存/读取路径 (默认: ./deceiver_map.json) |
-| --dictionary | -d     | (可选) 自定义误导性词库文件路径                   |
+| --dictionary | -d     | (可选) 自定义误导性词库文件路径                     |
+| --seed       |        | (可选) 随机种子, 用于生成可重复的输出               |
 * 混淆示例
 ** 原始代码 (Original)
 #+BEGIN_SRC csharp
@@ -52,6 +79,46 @@ SharpDeceiver 是一个专门为 C# 设计的源代码级混淆工具. 与传统
       }
   }
 #+END_SRC
+
+* 字典文件在哪里?
+- 默认使用内置词库 (在代码中, 无单独文件).
+- 若需自定义, 使用 =--dictionary /path/to/dictionary.json= 指定文件.
+
+* 自定义词库格式与要求
+支持两种格式, 优先 JSON.
+
+** 1) JSON
+#+BEGIN_SRC json
+{
+  "prefixes": ["Core", "Main"],
+  "nouns": ["Engine", "Scheduler"],
+  "suffixes": ["Service", "Provider"],
+  "verbs": ["process", "build"],
+  "adjectives": ["current", "final"],
+  "technicalNouns": ["buffer", "queue"]
+}
+#+END_SRC
+
+** 2) 纯文本
+每行一个词, 支持 # 或 // 注释. 纯文本会覆盖 nouns 与 technicalNouns.
+
+** 词库要求 (建议)
+- 建议使用 ASCII 字母/数字/下划线, 避免空格与标点, 以保证生成的标识符合法.
+- 单词建议首字母小写或大写均可, 工具会进行驼峰/组合.
+- JSON 中各字段数组至少包含 1 个元素 (为空将沿用默认词库).
+- 纯文本用于快速替换 nouns/technicalNouns, 其它字段仍使用默认词库.
+
+* 映射文件与 Git 管理建议
+- 映射文件 *包含还原所需信息*, 建议单独保存并备份.
+- 建议不要提交到公共仓库.
+- 若不需要还原, 可删除映射文件.
+
+* 哪些内容不会被混淆
+- 入口方法 =Main=
+- 重写方法
+- 接口实现
+- 命名空间
+- 局部变量与参数
 
 ** 混淆后代码 (Deceived)
 #+BEGIN_SRC csharp
